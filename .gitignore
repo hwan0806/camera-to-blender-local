@@ -4,6 +4,7 @@
 # Python
 .venv/
 venv/
+.pixi/
 __pycache__/
 *.pyc
 *.pyo

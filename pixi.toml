@@ -1,0 +1,23 @@
+[workspace]
+name = "camera-to-blender"
+version = "0.1.0"
+description = "Local-only photo-to-3D relay for Blender"
+channels = ["conda-forge"]
+platforms = ["osx-arm64"]
+
+[dependencies]
+python = "3.12.*"
+
+[pypi-dependencies]
+fastapi = "==0.110.0"
+uvicorn = { version = "==0.29.0", extras = ["standard"] }
+websockets = "==12.0"
+websocket-client = "==1.7.0"
+httpx = "==0.27.0"
+python-dotenv = "==1.0.1"
+python-multipart = "==0.0.30"
+google-generativeai = "==0.8.3"
+
+[tasks]
+server = "python relay_server.py"
+check = "python -m compileall -q relay_server.py blender_addon"
