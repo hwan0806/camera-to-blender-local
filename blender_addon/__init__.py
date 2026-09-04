@@ -112,8 +112,8 @@ class WSImportPreferences(bpy.types.AddonPreferences):
 
     ws_url: bpy.props.StringProperty(
         name="WebSocket URL",
-        default="ws://localhost:8000/ws?client=blender",
-        description="WebSocket URL for Blender connection. Use wss:// for ngrok HTTPS, ws:// for local"
+        default="ws://127.0.0.1:8001/ws?client=blender",
+        description="Local WebSocket URL for the Camera to 3D relay server"
     )
 
     def draw(self, context):
@@ -175,4 +175,3 @@ def unregister():
 
 if __name__ == "__main__":
     register()
-

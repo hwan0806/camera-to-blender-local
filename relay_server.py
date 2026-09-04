@@ -10,20 +10,21 @@ Endpoints:
 Usage:
   cp .env.example .env  # fill in API keys
   pip install -r requirements.txt
-  uvicorn relay_server:app --host 0.0.0.0 --port 8000
+  python relay_server.py  # listens only on 127.0.0.1:8001
 """
 import asyncio
+import ipaddress
 import json
 import os
 import httpx
 from typing import Dict, Set
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, HTTPException, UploadFile, File
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
+from urllib.parse import urlparse
 
 load_dotenv()
 
@@ -42,14 +43,43 @@ class RelayPayload(BaseModel):
 
 app = FastAPI(title="Photo → 3D → Blender")
 
-# CORS for webapp
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+
+def is_local_origin(origin: str) -> bool:
+    """Allow browser requests only from a page served on this computer."""
+    try:
+        parsed = urlparse(origin)
+        return parsed.scheme in {"http", "https"} and parsed.hostname in {
+            "localhost",
+            "127.0.0.1",
+            "::1",
+        }
+    except ValueError:
+        return False
+
+
+def is_loopback_address(host: str) -> bool:
+    """Accept IPv4, IPv6, and IPv4-mapped loopback peer addresses."""
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return host == "localhost"
+    return address.is_loopback or bool(
+        address.version == 6
+        and address.ipv4_mapped
+        and address.ipv4_mapped.is_loopback
+    )
+
+
+@app.middleware("http")
+async def reject_non_local_browser_origins(request: Request, call_next):
+    if request.client and not is_loopback_address(request.client.host):
+        return JSONResponse(status_code=403, content={"detail": "Local access only"})
+    # Same-origin navigation may omit Origin. If a browser supplies it, require
+    # it to be a loopback origin so arbitrary websites cannot drive this API.
+    origin = request.headers.get("origin")
+    if origin and not is_local_origin(origin):
+        return JSONResponse(status_code=403, content={"detail": "Local access only"})
+    return await call_next(request)
 
 # WebSocket connections
 connections: Dict[str, Set[WebSocket]] = {}
@@ -61,6 +91,13 @@ lock = asyncio.Lock()
 # ─────────────────────────────────────────────────────────────────────────────
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket, client: str):
+    if websocket.client and not is_loopback_address(websocket.client.host):
+        await websocket.close(code=1008, reason="Local access only")
+        return
+    origin = websocket.headers.get("origin")
+    if origin and not is_local_origin(origin):
+        await websocket.close(code=1008, reason="Local access only")
+        return
     await websocket.accept()
     async with lock:
         connections.setdefault(client, set()).add(websocket)
@@ -440,12 +477,11 @@ async def proxy_model(url: str):
             if resp.status_code != 200:
                 raise HTTPException(status_code=resp.status_code, detail=f"Failed to fetch model: {resp.status_code}")
             
-            # Return the model with proper CORS headers
+                    # Return the model to the same-origin web application.
             return Response(
                 content=resp.content,
                 media_type="model/gltf-binary",
                 headers={
-                    "Access-Control-Allow-Origin": "*",
                     "Content-Disposition": "inline"
                 }
             )
@@ -456,35 +492,12 @@ async def proxy_model(url: str):
 
 @app.get("/connection-info")
 async def connection_info():
-    """Returns WebSocket URL info for Blender connection."""
-    # Try to detect ngrok URL
-    ngrok_url = None
-    try:
-        async with httpx.AsyncClient(timeout=2.0) as client:
-            resp = await client.get("http://127.0.0.1:4040/api/tunnels")
-            if resp.status_code == 200:
-                data = resp.json()
-                tunnels = data.get("tunnels", [])
-                for tunnel in tunnels:
-                    if tunnel.get("proto") == "https":
-                        ngrok_url = tunnel.get("public_url", "").replace("https://", "wss://")
-                        break
-    except Exception:
-        pass
-    
-    # Determine WebSocket URL
-    if ngrok_url:
-        ws_url = f"{ngrok_url}/ws?client=blender"
-        connection_type = "ngrok"
-    else:
-        # Use current request host or default to localhost
-        ws_url = "ws://localhost:8000/ws?client=blender"
-        connection_type = "local"
-    
+    """Return the fixed loopback WebSocket endpoint."""
+    port = int(os.getenv("PORT", "8001"))
     return {
-        "ws_url": ws_url,
-        "connection_type": connection_type,
-        "ngrok_detected": bool(ngrok_url)
+        "ws_url": f"ws://127.0.0.1:{port}/ws?client=blender",
+        "connection_type": "local",
+        "clients": {k: len(v) for k, v in connections.items()},
     }
 
 
@@ -496,3 +509,11 @@ import pathlib
 webapp_dir = pathlib.Path(__file__).parent / "webapp"
 if webapp_dir.exists():
     app.mount("/", StaticFiles(directory=str(webapp_dir), html=True), name="webapp")
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    # Deliberately bind only to the loopback interface. Use `python relay_server.py`
+    # so this safe default cannot be accidentally replaced by a copied CLI command.
+    uvicorn.run(app, host="127.0.0.1", port=int(os.getenv("PORT", "8001")))
